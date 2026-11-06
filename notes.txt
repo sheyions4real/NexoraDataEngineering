@@ -1,0 +1,501 @@
+Create the project directory
+mkdir NexoraDataEngineering
+
+cd NexoraDataEngineering
+
+
+Step 3.3 — Create the virtual environment
+py -m venv .venv
+
+
+Step 3.4 — Activate it
+.\.venv\Scripts\Activate.ps1
+
+
+If PowerShell blocks activation, run:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+
+Then activate again.
+
+Your terminal should now look something like:
+(.venv) PS C:\Users\...\python projects\NexoraDataEngineering>
+
+
+Step 3.5 — Verify Python
+python --version
+
+python -m pip --version
+
+
+
+4. Configure VS Code
+Open the new project folder in VS Code.
+code .
+
+
+Then:
+1. Press Ctrl + Shift + P.
+2. Search for Python: Select Interpreter.
+3. Select the interpreter inside your project's .venv directory.
+4. Open a new VS Code terminal.
+5. Confirm that (.venv) appears.
+This ensures VS Code uses the correct Python environment.
+
+5. Dependencies we will introduce
+We'll eventually use these packages:
+Package	Purpose
+sqlalchemy	Database abstraction and connection management
+pyodbc	SQL Server connectivity
+pandas	Optional tabular data operations
+pyarrow	Parquet serialization
+azure-identity	Microsoft Entra authentication
+azure-storage-file-datalake	ADLS Gen2 file operations
+pydantic-settings	Configuration and environment variables
+pytest	Automated testing
+ruff	Linting and formatting
+
+
+---------------------- Package Setup --------------------------------------
+run this command from the terminal to setup the project
+
+$directories = @(
+    "src/nexora_data_engineering",
+    "src/nexora_data_engineering/config",
+    "src/nexora_data_engineering/domain/models",
+    "src/nexora_data_engineering/domain/contracts",
+    "src/nexora_data_engineering/domain/exceptions",
+    "src/nexora_data_engineering/application/pipelines",
+    "src/nexora_data_engineering/application/services",
+    "src/nexora_data_engineering/application/ports",
+    "src/nexora_data_engineering/infrastructure/database",
+    "src/nexora_data_engineering/infrastructure/storage",
+    "src/nexora_data_engineering/infrastructure/serialization",
+    "src/nexora_data_engineering/observability",
+    "tests/unit",
+    "tests/integration",
+    "tests/fixtures",
+    "scripts",
+    "docs/architecture",
+    "docs/pipelines"
+)
+
+$directories | ForEach-Object {
+    New-Item -ItemType Directory -Force -Path $_ | Out-Null
+}
+
+
+Now create the Python package initializers:
+
+$initFiles = @(
+    "src/nexora_data_engineering/__init__.py",
+    "src/nexora_data_engineering/config/__init__.py",
+    "src/nexora_data_engineering/domain/__init__.py",
+    "src/nexora_data_engineering/domain/models/__init__.py",
+    "src/nexora_data_engineering/domain/contracts/__init__.py",
+    "src/nexora_data_engineering/domain/exceptions/__init__.py",
+    "src/nexora_data_engineering/application/__init__.py",
+    "src/nexora_data_engineering/application/pipelines/__init__.py",
+    "src/nexora_data_engineering/application/services/__init__.py",
+    "src/nexora_data_engineering/application/ports/__init__.py",
+    "src/nexora_data_engineering/infrastructure/__init__.py",
+    "src/nexora_data_engineering/infrastructure/database/__init__.py",
+    "src/nexora_data_engineering/infrastructure/storage/__init__.py",
+    "src/nexora_data_engineering/infrastructure/serialization/__init__.py",
+    "src/nexora_data_engineering/observability/__init__.py"
+)
+
+$initFiles | ForEach-Object {
+    New-Item -ItemType File -Force -Path $_ | Out-Null
+}
+
+
+
+NexoraDataEngineering/
+│
+├── .venv/
+│
+├── src/
+│   └── nexora_data_engineering/
+│       ├── config/
+│       ├── domain/
+│       │   ├── models/
+│       │   ├── contracts/
+│       │   └── exceptions/
+│       ├── application/
+│       │   ├── pipelines/
+│       │   ├── services/
+│       │   └── ports/
+│       ├── infrastructure/
+│       │   ├── database/
+│       │   ├── storage/
+│       │   └── serialization/
+│       ├── observability/
+│       └── __init__.py
+│
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── fixtures/
+│
+├── scripts/
+├── docs/
+│   ├── architecture/
+│   └── pipelines/
+│
+├── .env
+├── .env.example
+├── .gitignore
+├── README.md
+└── pyproject.toml
+
+
+
+Step 2 — Configure project dependencies
+We'll use pyproject.toml as our central project configuration instead of maintaining separate dependency lists in multiple files.
+
+Create pyproject.toml in your root directory:
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexora-data-engineering"
+version = "0.1.0"
+description = "Enterprise data ingestion and lakehouse platform for Nexora."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "SQLAlchemy>=2.0,<3.0",
+    "pyodbc>=5.0,<6.0",
+    "pyarrow>=18.0",
+    "azure-identity>=1.19",
+    "azure-storage-file-datalake>=12.18",
+    "pydantic-settings>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nexora_data_engineering = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+
+
+A few important choices:
+- SQLAlchemy gives us a database abstraction rather than scattering SQL Server connection logic throughout the application.
+- PyArrow will handle Parquet files.
+- Azure Identity and the Data Lake SDK will handle authentication and storage operations.
+- Pydantic Settings will centralize configuration.
+- Pytest and Ruff establish our testing and code-quality standards.
+
+
+
+Step 3 — Create environment and Git configuration files
+Create .env.example:
+
+# Application
+APP_NAME=NexoraDataEngineering
+APP_ENVIRONMENT=development
+LOG_LEVEL=INFO
+
+# SQL Server source
+DB_SERVER=localhost
+DB_DATABASE=NexoraEnterprise
+DB_USERNAME=sa
+DB_PASSWORD=CHANGE_ME
+DB_DRIVER=ODBC Driver 18 for SQL Server
+DB_ENCRYPT=yes
+DB_TRUST_SERVER_CERTIFICATE=yes
+
+# Azure Data Lake Gen2
+AZURE_STORAGE_ACCOUNT_URL=https://stnexoradatalake.dfs.core.windows.net
+AZURE_STORAGE_FILESYSTEM=nexora
+
+
+
+Create your local .env from this template:
+Copy-Item .env.example .env
+
+
+Open .env and replace CHANGE_ME with your SQL Server password locally. Don't paste the actual password into chat or commit .env to Git.
+
+Create .gitignore:
+
+# Python environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Ruff
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# Local data and checkpoints
+data/
+checkpoints/
+
+
+
+Create README.md:
+
+# Nexora Data Engineering Platform
+
+An enterprise-oriented data engineering platform for ingesting, validating,
+and transforming data from NexoraEnterprise into Azure Data Lake Storage Gen2.
+
+## Architecture
+
+- Source: Microsoft SQL Server
+- Initial source scope: NexoraEnterprise / Sales schema
+- Storage: Azure Data Lake Storage Gen2
+- Raw data layer: Bronze
+- File format: Apache Parquet
+- Language: Python
+
+## Development Setup
+
+### 1. Create virtual environment
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+### 2. Install dependencies
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+### 3. Configure environment
+
+Copy `.env.example` to `.env` and supply local configuration.
+
+### 4. Run tests
+
+```powershell
+pytest
+```
+
+### 5. Check code quality
+
+```powershell
+ruff check .
+ruff format --check .
+```
+
+## Initial Scope
+
+Extract data from the Sales schema in NexoraEnterprise and land
+the raw extracts in the Bronze layer of ADLS Gen2.
+
+
+
+Finally, create an empty py.typed marker:
+New-Item -ItemType File -Force `
+    -Path "src/nexora_data_engineering/py.typed"
+
+
+This marks our package as supporting Python type information.
+Step 4 — Install dependencies
+Make sure (.venv) is still active.
+
+Run:
+python -m pip install --upgrade pip
+
+
+Then install the project and development dependencies:
+python -m pip install -e ".[dev]"
+
+
+The -e option installs our project in editable mode. This means Python can import the package directly from src while we continue developing it, without reinstalling after every code change.
+Step 5 — Verify the installation
+Run these commands individually:
+python -m pip check
+
+
+python -c "import sqlalchemy, pyodbc, pyarrow, azure.identity, azure.storage.filedatalake, pydantic_settings; print('Core dependencies installed successfully')"
+
+
+pytest --version
+
+
+ruff --version
+
+
+Also check whether the SQL Server ODBC driver is installed:
+python -c "import pyodbc; print(pyodbc.drivers())"
+
+
+Important
+ We need to see ODBC Driver 18 for SQL Server (or another installed Microsoft SQL Server ODBC driver) in that final output. Installing pyodbc alone does not install the underlying Microsoft ODBC driver.
+
+If Driver 18 is missing, we'll install it before attempting the database connection.
+Step 6 — What we will build next
+Once installation is verified, we'll implement these components in order:
+Component	File	Responsibility
+Application settings	config/settings.py	Load and validate environment configuration
+Logging	observability/logging_config.py	Centralized structured application logging
+Database connection	infrastructure/database/sql_server.py	SQLAlchemy engine and connection management
+Database discovery	infrastructure/database/schema_inspector.py	Discover Sales tables, columns and keys
+Extraction service	application/services/extraction_service.py	Coordinate source extraction
+Parquet writer	infrastructure/serialization/parquet_writer.py	Serialize extracted records
+ADLS uploader	infrastructure/storage/adls_gen2.py	Upload Bronze files
+
+We'll also introduce interfaces so that the application layer does not depend directly on SQL Server or Azure implementations.
+
+
+
+
+
+
+Python pipelines
+-----------------------------------------------------------------------
+1 - Connect to local/source Server
+2 - implement schema discovery (read all source scheme using sqlalchemy)
+3 - get the Sales.SalesOrders schema table from the retrieved schemas
+4 - Implement Batch Extraction to extract the SalesOrders table records using sqlalchemy Table
+5 - Retrieve the Sales.SalesOrder Ingestion Metadata
+6 - Serialize the extracted data into Parquet file
+7 - Using Azure Client upload the generated Parquet file to Azure Datalake Storage
+8 - ADLS storage folder structure will look like this
+    bronze/
+        source_system=sqlserver/
+            database=NexoraEnterprise/
+                schema=Sales/
+                    table=SalesOrders/
+                        load_date=2026-11-04/
+                            run_id=<unique-run-id>/
+                                part-00001.parquet
+                schema=CustomerService/
+                    table=Customers/
+                        load_date=2026-11-04/
+                            run_id=<unique-run-id>/
+                                part-00001.parquet
+
+9 - Before proceeding with other schema validate the bronze SalesOrders parquet 
+    - the process involces the following below
+
+
+1. What we are going to validate
+For our first table, Sales.SalesOrders, we'll validate four things:
+Validation	            What we want to establish
+- File integrity	    The uploaded Parquet file can be downloaded and read
+- Schema validation	    Expected source and ingestion columns exist
+- Record count	        Number of records in Parquet matches SQL Server
+- Data integrity	    Source records and destination records contain matching values
+
+We'll eventually add null checks, duplicate detection, business rules and audit records. For now, let's establish the foundation.
+
+
+------------------- IMPLEMENTED AUDIT FOR INGESTION ----------------
+
+SEE ingestion_audit_service.py
+    data_lake_storage.py interface on application/ports
+    service consumption in the main.py
+
+
+-------------------- CODE FORMATING AND LINTING USING RUFF -----------------
+# 1. Automatically fix supported linting issues
+ruff check src --fix
+
+# 2. Automatically format Python files
+ruff format src
+
+# 3. Verify linting
+ruff check src
+
+# 4. Verify formatting
+ruff format --check src
+
+# 5. Run automated tests
+pytest
+
+
+
+
+--------- REFACTOR THE MAIN.PY INTO BRONZE INGESTION PIPELINE ----------
+So this pipeline can work for any schema of choice
+
+2. How the pipeline will execute
+For each table, the pipeline will perform this lifecycle:
+1. Initialize ingestion run
+   
+   Generate a unique run_id, timestamp and load date. Create the initial IngestionAudit with RUNNING status.
+2. Prepare Bronze destination
+   
+   Construct the partitioned destination using the supplied table metadata.
+3. Extract source batches
+   
+   Call TableExtractionService.extract_table() using the supplied table and configured batch size.
+4. Enrich and serialize
+   
+   Add ingestion metadata to each record and serialize the batch through DataSerializer.
+5. Upload to ADLS
+   
+   Persist each Parquet file using the DataLakeStorage port.
+6. Verify and validate
+   
+   Download the uploaded file, verify byte integrity, and validate its Parquet structure, row count, columns and keys.
+7. Update audit metrics
+   
+   Update row, batch, file and byte counts, persisting the audit after successful batch processing.
+8. Finalize execution
+   
+   Mark the audit SUCCEEDED and validation PASSED, or record the failure and preserve the error information.
