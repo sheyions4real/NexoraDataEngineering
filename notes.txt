@@ -499,3 +499,45 @@ For each table, the pipeline will perform this lifecycle:
 8. Finalize execution
    
    Mark the audit SUCCEEDED and validation PASSED, or record the failure and preserve the error information.
+
+
+
+   ++++++++++++++ AFTER RECONCILATION PROCESS +++++++++++++++++++++++
+   Added reconcilation service to the bronze ingestion process
+
+   here is the final json
+   {
+    "run_id": "33fa21bb-8dc1-4229-b510-5239b5e6882e",
+    "pipeline_name": "sqlserver_to_bronze",
+    "source_system": "sqlserver",
+    "source_database": "NexoraEnterprise",
+    "source_schema": "Sales",
+    "source_table": "SalesOrders",
+    "status": "SUCCEEDED",
+    "validation_status": "PASSED",
+    "started_at_utc": "2026-11-06T15:19:24.400534+00:00",
+    "completed_at_utc": "2026-11-06T15:19:36.844983+00:00",
+    "total_rows": 51,
+    "total_batches": 1,
+    "total_files": 1,
+    "total_bytes": 13632,
+    "error_message": null,
+    "source_row_count": 51,
+    "extracted_row_count": 51,
+    "validated_row_count": 51,
+    "expected_batch_count": 1,
+    "verified_files": 1,
+    "verified_bytes": 13632,
+    "reconciliation_status": "PASSED",
+    "reconciliation_errors": []
+}
+
+What this proves
+Your pipeline now demonstrates several important data engineering controls:
+1. Extraction completeness: the number of records extracted matches the source count.
+2. Serialization: the extracted data was successfully serialized into Parquet.
+3. Storage integrity: the downloaded file matches the uploaded file byte-for-byte.
+4. Data validation: the Bronze file passed schema, row-count, nullability, and primary-key checks.
+5. Reconciliation: the run-level metrics agree across the source, extraction, validation, and storage stages.
+6. Auditability: the pipeline records the outcome and its supporting metrics in audit.json.
+

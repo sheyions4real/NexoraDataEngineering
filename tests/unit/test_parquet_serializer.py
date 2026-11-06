@@ -1,4 +1,3 @@
-
 """Unit tests for the Parquet serialization infrastructure."""
 
 from io import BytesIO
@@ -13,7 +12,7 @@ from nexora_data_engineering.infrastructure.serialization.parquet_serializer imp
 
 
 def test_serialize_returns_valid_parquet_bytes() -> None:
-    #Arrange
+    # Arrange
     serializer = ParquetSerializer()
 
     records = [

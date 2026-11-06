@@ -72,7 +72,7 @@ class Settings(BaseSettings):
         return [schema.strip() for schema in self.source_schemas.split(",") if schema.strip()]
 
     # Extraction
-    extraction_batch_size: int = 10_000
+    extraction_batch_size: int = Field(default=10_000, gt=0)
 
     # Data lake layout
     bronze_root_path: str = "bronze"

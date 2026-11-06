@@ -42,3 +42,7 @@ class TableExtractor(Protocol):
     ) -> Iterator[list[dict[str, Any]]]:
         """Extract table records in batches."""
         ...
+
+    def count_rows(self, table: TableMetadata) -> int:
+        """Return the number of records in the source table."""
+        ...

@@ -51,3 +51,8 @@ class TableExtractionService:
             raise ValueError("Batch size must be greater than zero.")
 
         return self._extractor.extract_batches(table, batch_size)
+
+    def count_rows(self, table: TableMetadata) -> int:
+        """Return the source table record count."""
+
+        return self._extractor.count_rows(table)

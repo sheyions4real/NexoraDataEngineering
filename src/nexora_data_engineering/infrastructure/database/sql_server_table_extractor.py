@@ -32,7 +32,7 @@ DESIGN CONSIDERATIONS:
 from collections.abc import Iterator
 from typing import Any
 
-from sqlalchemy import MetaData, Table, select
+from sqlalchemy import MetaData, Table, func, select
 from sqlalchemy.engine import Engine
 
 from nexora_data_engineering.domain.models.table_metadata import TableMetadata
@@ -70,3 +70,20 @@ class SQLServerTableExtractor:
 
             for partition in result.mappings().partitions(batch_size):
                 yield [dict(row) for row in partition]
+
+    def count_rows(self, table: TableMetadata) -> int:
+        """Return the current source table record count."""
+
+        source_table = Table(
+            table.name,
+            MetaData(),
+            schema=table.schema,
+            autoload_with=self._engine,
+        )
+
+        statement = select(func.count()).select_from(source_table)
+
+        with self._engine.connect() as connection:
+            result = connection.scalar(statement)
+
+        return int(result or 0)
