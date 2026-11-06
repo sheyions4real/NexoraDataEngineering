@@ -5,51 +5,45 @@ ARCHITECTURAL LAYER:
 Application Entry Point / Composition Root
 
 PURPOSE:
-Coordinates the SQL Server-to-Bronze ingestion pipeline.
+Initializes and executes the Nexora multi-table
+SQL Server-to-Bronze ingestion application.
 
 RESPONSIBILITIES:
-- Load application configuration and initialize logging.
+- Load application configuration.
+- Initialize application logging.
 - Establish source database connectivity.
-- Discover configured source schemas and table metadata.
-- Initialize extraction, serialization, validation, and storage components.
-- Extract source records in configurable batches.
-- Serialize batches into Parquet files.
-- Upload Bronze data to Azure Data Lake Storage Gen2.
-- Verify uploaded file integrity and validate Bronze datasets.
-- Reconcile source, extracted, validated, and uploaded metrics.
-- Maintain the ingestion audit record.
-- Handle application-level execution failures.
-
-DATA ENGINEERING ROLE:
-Acts as the composition root for the initial Bronze ingestion pipeline.
+- Discover configured source schemas.
+- Resolve configured Bronze table selections.
+- Instantiate infrastructure implementations.
+- Inject dependencies into application services and pipelines.
+- Execute the multi-table Bronze ingestion runner.
+- Log the overall ingestion summary.
+- Release infrastructure resources.
 
 DESIGN CONSIDERATIONS:
-- Wires application services to infrastructure implementations.
-- Keeps database-specific extraction logic in infrastructure.
-- Keeps validation and reconciliation in application services.
-- Does not contain Silver or Gold transformation logic.
+- Acts as the composition root for dependency injection.
+- Does not implement ingestion workflow logic.
+- Delegates single-table ingestion to BronzeIngestionPipeline.
+- Delegates multi-table coordination to BronzeIngestionRunner.
 """
 
-import json
 import logging
 
-# Serialization and upload to azure datalake storage
-from datetime import UTC, datetime
-from uuid import uuid4
-
+from nexora_data_engineering.application.pipelines.bronze_ingestion_pipeline import (
+    BronzeIngestionPipeline,
+)
+from nexora_data_engineering.application.runners.bronze_ingestion_runner import (
+    BronzeIngestionRunner,
+)
 from nexora_data_engineering.application.services.bronze_reconciliation_service import (
     BronzeReconciliationService,
 )
 from nexora_data_engineering.application.services.bronze_validation_service import (
     BronzeValidationService,
 )
-
-# schema discovery implementations
 from nexora_data_engineering.application.services.schema_discovery_service import (
     SchemaDiscoveryService,
 )
-
-# table extractor implementation
 from nexora_data_engineering.application.services.table_extraction_service import (
     TableExtractionService,
 )
@@ -73,7 +67,8 @@ from nexora_data_engineering.infrastructure.storage.azure_data_lake import (
 
 
 def main() -> None:
-    """Application entry point."""
+    """Initialize dependencies and execute multi-table Bronze ingestion."""
+
     settings = get_settings()
 
     logging.basicConfig(
@@ -86,39 +81,14 @@ def main() -> None:
     logger.info("Starting %s", settings.app_name)
     logger.info("Environment: %s", settings.app_environment)
 
-    # Define variables and object
     engine = None
     storage_client = None
 
-    audit_record = None
-    audit_path = None
-
-    # ---------------------------------------------------------
-    # Ingestion metrics
-    # ---------------------------------------------------------
-
-    source_row_count = 0
-    expected_batch_count = 0
-
-    extracted_rows = 0
-    validated_rows = 0
-
-    batch_count = 0
-
-    uploaded_files = 0
-    verified_files = 0
-
-    uploaded_bytes = 0
-    verified_bytes = 0
-
-    # ---------------------------------------------------------
-    # Failure classification
-    # ---------------------------------------------------------
-
-    validation_failed = False
-    reconciliation_result = None
-
     try:
+        # ---------------------------------------------------------
+        # 1. Initialize source database connectivity
+        # ---------------------------------------------------------
+
         engine = get_sql_server_engine()
         database_info = test_database_connection()
 
@@ -127,75 +97,67 @@ def main() -> None:
         logger.info("Database: %s", database_info["database_name"])
         logger.info("Login: %s", database_info["login_name"])
 
-        # Discover Sales schema
-        logger.info("Starting source schema discovery: Sales")
+        # ---------------------------------------------------------
+        # 2. Discover configured source schemas
+        # ---------------------------------------------------------
 
         inspector = SQLServerSchemaInspector(engine)
-
-        # Dependency Injection SQLServerSchemaInspector represents
-        # SchemaInspector because of the contract
         discovery_service = SchemaDiscoveryService(inspector)
 
-        # ---------------------------------------------------------
-        # 1. Discover configured source schemas
-        # ---------------------------------------------------------
-
-        sales_orders_table = None
+        discovered_tables = []
 
         for schema in settings.configured_source_schemas:
-            logger.info("Starting source schema discovery: %s", schema)
+            logger.info("Discovering source schema: %s", schema)
 
-            tables = discovery_service.discover_schema(schema)
+            schema_tables = discovery_service.discover_schema(schema)
+            discovered_tables.extend(schema_tables)
 
             logger.info(
-                "Discovered %d tables in %s schema",
-                len(tables),
+                "Discovered %d tables in schema %s",
+                len(schema_tables),
                 schema,
             )
 
-            for table in tables:
-                logger.info(
-                    "Table: %s.%s | Columns: %d | Primary Key: %s | Foreign Keys: %d",
-                    table.schema,
-                    table.name,
-                    len(table.columns),
-                    ", ".join(table.primary_key) or "None",
-                    len(table.foreign_keys),
-                )
-
-                for column in table.columns:
-                    logger.info(
-                        "    Column: %-30s | Type: %-20s | Nullable: %-5s",
-                        column.name,
-                        column.data_type,
-                        column.nullable,
-                    )
-
-                for foreign_key in table.foreign_keys:
-                    logger.info(
-                        "    Foreign Key: %s -> %s.%s (%s)",
-                        ", ".join(foreign_key.columns),
-                        foreign_key.referred_schema or "default schema",
-                        foreign_key.referred_table,
-                        ", ".join(foreign_key.referred_columns),
-                    )
-
-                # Select only the SalesOrders table for our first extraction.
-                if table.schema.casefold() == "sales" and table.name.casefold() == "salesorders":
-                    sales_orders_table = table
-
         # ---------------------------------------------------------
-        # 2. Initialize serialization and storage components
+        # 3. Resolve configured Bronze table selections
         # ---------------------------------------------------------
 
-        if sales_orders_table is None:
-            raise RuntimeError("Sales.SalesOrders was not found in the configured source schemas.")
+        discovered_table_lookup = {
+            (table.schema.casefold(), table.name.casefold()): table for table in discovered_tables
+        }
 
-        logger.info("Initializing Parquet serializer")
+        selected_tables = []
+        missing_tables = []
 
+        for schema, table_name in settings.configured_bronze_tables:
+            table_reference = (schema.casefold(), table_name.casefold())
+            table_metadata = discovered_table_lookup.get(table_reference)
+
+            if table_metadata is None:
+                missing_tables.append(f"{schema}.{table_name}")
+                continue
+
+            selected_tables.append(table_metadata)
+
+        if missing_tables:
+            raise RuntimeError(
+                "Configured Bronze tables were not discovered: " + ", ".join(missing_tables)
+            )
+
+        logger.info(
+            "Selected %d Bronze tables for ingestion",
+            len(selected_tables),
+        )
+
+        for table in selected_tables:
+            logger.info("Selected table: %s.%s", table.schema, table.name)
+
+        # ---------------------------------------------------------
+        # 4. Initialize infrastructure implementations
+        # ---------------------------------------------------------
+
+        extractor = SQLServerTableExtractor(engine)
         serializer = ParquetSerializer()
-
-        logger.info("Connecting to Azure Data Lake Storage Gen2")
 
         storage_client = AzureDataLakeStorage(
             account_url=settings.azure_storage_account_url,
@@ -203,452 +165,78 @@ def main() -> None:
         )
 
         # ---------------------------------------------------------
-        # 3. Initialize extraction service
+        # 5. Initialize application services
         # ---------------------------------------------------------
-
-        extractor = SQLServerTableExtractor(engine)
 
         extraction_service = TableExtractionService(extractor)
-
-        logger.info("Initializing Bronze validation service")
-        bronze_validator = BronzeValidationService()
-        bronze_reconciler = BronzeReconciliationService()
+        validation_service = BronzeValidationService()
+        reconciliation_service = BronzeReconciliationService()
 
         # ---------------------------------------------------------
-        # 4. Create ingestion run metadata
+        # 6. Construct the reusable single-table pipeline
         # ---------------------------------------------------------
 
-        run_id = str(uuid4())
-
-        ingestion_timestamp = datetime.now(UTC)
-
-        load_date = ingestion_timestamp.strftime("%Y-%m-%d")
-
-        source_system = "sqlserver"
-
-        source_database = settings.db_database
-
-        source_schema = sales_orders_table.schema
-
-        source_table = sales_orders_table.name
-
-        source_row_count = extraction_service.count_rows(sales_orders_table)
-
-        expected_batch_count = (
-            source_row_count + settings.extraction_batch_size - 1
-        ) // settings.extraction_batch_size
-
-        logger.info(
-            "Source record count | Table: %s.%s | Rows: %d",
-            source_schema,
-            source_table,
-            source_row_count,
-        )
-
-        logger.info(
-            "Expected extraction batches: %d",
-            expected_batch_count,
-        )
-
-        # ---------------------------------------------------------
-        # 4.1 Define expected Bronze schema
-        # ---------------------------------------------------------
-
-        ingestion_metadata_columns = (
-            "_ingested_at_utc",
-            "_source_system",
-            "_source_database",
-            "_source_schema",
-            "_source_table",
-            "_batch_id",
-        )
-
-        expected_bronze_columns = (
-            tuple(column.name for column in sales_orders_table.columns) + ingestion_metadata_columns
-        )
-
-        logger.info(
-            "Expected Bronze columns: %d",
-            len(expected_bronze_columns),
-        )
-
-        bronze_directory = (
-            f"{settings.bronze_root_path}/"
-            f"source_system={source_system}/"
-            f"database={source_database}/"
-            f"schema={source_schema}/"
-            f"table={source_table}/"
-            f"load_date={load_date}/"
-            f"run_id={run_id}"
-        )
-
-        # ---------------------------------------------------------
-        # 4.2 Initialize ingestion audit record
-        # ---------------------------------------------------------
-
-        audit_record = {
-            "run_id": run_id,
-            "pipeline_name": "sqlserver_to_bronze",
-            "source_system": source_system,
-            "source_database": source_database,
-            "source_schema": source_schema,
-            "source_table": source_table,
-            "status": "RUNNING",
-            "validation_status": "PENDING",
-            "started_at_utc": ingestion_timestamp.isoformat(),
-            "completed_at_utc": None,
-            "total_rows": 0,
-            "total_batches": 0,
-            "total_files": 0,
-            "total_bytes": 0,
-            "error_message": None,
-            "source_row_count": source_row_count,
-            "extracted_row_count": 0,
-            "validated_row_count": 0,
-            "expected_batch_count": expected_batch_count,
-            "verified_files": 0,
-            "verified_bytes": 0,
-            "reconciliation_status": "PENDING",
-            "reconciliation_errors": [],
-        }
-
-        audit_path = (
-            f"audit/"
-            f"source_system={source_system}/"
-            f"database={source_database}/"
-            f"schema={source_schema}/"
-            f"table={source_table}/"
-            f"load_date={load_date}/"
-            f"run_id={run_id}/"
-            "audit.json"
-        )
-
-        # Persist initial RUNNING status.
-        storage_client.upload_file(
-            file_path=audit_path,
-            content=json.dumps(audit_record, indent=4).encode("utf-8"),
-            overwrite=True,
-        )
-
-        logger.info("Initial ingestion audit record created: %s", audit_path)
-
-        # ---------------------------------------------------------
-        # 5. Extract, serialize and upload each batch
-        # ---------------------------------------------------------
-
-        logger.info(
-            "Starting Bronze ingestion: %s.%s",
-            source_schema,
-            source_table,
-        )
-
-        for batch in extraction_service.extract_table(
-            sales_orders_table,
+        bronze_pipeline = BronzeIngestionPipeline(
+            extraction_service=extraction_service,
+            serializer=serializer,
+            storage=storage_client,
+            validator=validation_service,
+            reconciler=reconciliation_service,
+            source_database=settings.db_database,
             batch_size=settings.extraction_batch_size,
-        ):
-            batch_count += 1
-            extracted_rows += len(batch)
-
-            # Add technical ingestion metadata to each source record.
-            bronze_records = [
-                {
-                    **record,
-                    "_ingested_at_utc": ingestion_timestamp,
-                    "_source_system": source_system,
-                    "_source_database": source_database,
-                    "_source_schema": source_schema,
-                    "_source_table": source_table,
-                    "_batch_id": run_id,
-                }
-                for record in batch
-            ]
-
-            # Serialize the extracted batch into Parquet bytes.
-            parquet_content = serializer.serialize(bronze_records)
-
-            file_name = f"part-{batch_count:05d}.parquet"
-
-            destination_path = f"{bronze_directory}/{file_name}"
-
-            logger.info("Final Bronze destination path: %s", destination_path)
-            logger.info("Parquet content size: %s bytes", len(parquet_content))
-
-            if destination_path.endswith("/"):
-                raise ValueError(
-                    "Bronze destination path must include a filename, not just a directory."
-                )
-
-            if not destination_path.endswith(".parquet"):
-                raise ValueError("Bronze destination must be a Parquet file.")
-
-            # Upload the Parquet file to ADLS Gen2.
-            storage_client.upload_file(
-                file_path=destination_path,
-                content=parquet_content,
-            )
-
-            uploaded_files += 1
-            batch_bytes = len(parquet_content)
-            uploaded_bytes += batch_bytes
-
-            # ---------------------------------------------------------
-            # Bronze: Download and validate uploaded Parquet file
-            # ---------------------------------------------------------
-
-            logger.info(
-                "Starting Bronze validation for batch %d",
-                batch_count,
-            )
-
-            # Retrieve the uploaded file from Azure.
-            downloaded_content = storage_client.download_file(destination_path)
-
-            # Check that the downloaded bytes match the uploaded bytes.
-            if downloaded_content != parquet_content:
-                raise RuntimeError(
-                    f"Bronze file integrity check failed for batch {batch_count}: "
-                    "Downloaded content differs from uploaded content."
-                )
-            # Only count the file after its integrity check succeeds.
-            verified_files += 1
-            verified_bytes += len(downloaded_content)
-
-            logger.info(
-                "Bronze file integrity check passed | Batch: %d | Bytes: %d",
-                batch_count,
-                len(downloaded_content),
-            )
-
-            # Validate Parquet readability, expected columns and record count.
-            validation_result = bronze_validator.validate(
-                content=downloaded_content,
-                expected_columns=expected_bronze_columns,
-                expected_row_count=len(batch),
-                non_nullable_columns=tuple(
-                    column.name for column in sales_orders_table.columns if not column.nullable
-                )
-                + ingestion_metadata_columns,
-                primary_key_columns=sales_orders_table.primary_key,
-            )
-
-            if not validation_result.is_valid:
-                validation_failed = True
-                error_details = "; ".join(validation_result.errors)
-
-                logger.error(
-                    "Bronze validation failed | Batch: %d | Errors: %s",
-                    batch_count,
-                    error_details,
-                )
-
-                raise RuntimeError(
-                    f"Bronze validation failed for batch {batch_count}: {error_details}"
-                )
-
-            logger.info(
-                "Bronze validation passed | Batch: %d | Expected rows: %d | "
-                "Actual rows: %d | Columns: %d",
-                batch_count,
-                validation_result.expected_row_count,
-                validation_result.actual_row_count,
-                len(validation_result.actual_columns),
-            )
-
-            validated_rows += validation_result.actual_row_count
-
-            # ============================ VALIDATION ENDS ======================
-
-            # ---------------------------------------------------------
-            # Update ingestion audit progress
-            # ---------------------------------------------------------
-            audit_record.update(
-                {
-                    "validation_status": "IN_PROGRESS",
-                    "reconciliation_status": "PENDING",
-                    "extracted_row_count": extracted_rows,
-                    "validated_row_count": validated_rows,
-                    "total_rows": validated_rows,
-                    "total_batches": batch_count,
-                    "total_files": uploaded_files,
-                    "total_bytes": uploaded_bytes,
-                    "verified_files": verified_files,
-                    "verified_bytes": verified_bytes,
-                }
-            )
-
-            storage_client.upload_file(
-                file_path=audit_path,
-                content=json.dumps(audit_record, indent=4).encode("utf-8"),
-                overwrite=True,
-            )
-
-            logger.info(
-                "Uploaded batch %d | Rows: %d | Size: %d bytes | Path: %s",
-                batch_count,
-                len(batch),
-                batch_bytes,
-                destination_path,
-            )
-
-        # ---------------------------------------------------------
-        # 6. Reconcile the complete Bronze ingestion run
-        # ---------------------------------------------------------
-
-        logger.info("Starting Bronze ingestion reconciliation")
-
-        reconciliation_result = bronze_reconciler.reconcile(
-            source_row_count=source_row_count,
-            extracted_row_count=extracted_rows,
-            validated_row_count=validated_rows,
-            batch_size=settings.extraction_batch_size,
-            actual_batch_count=batch_count,
-            uploaded_file_count=uploaded_files,
-            verified_file_count=verified_files,
-            uploaded_bytes=uploaded_bytes,
-            verified_bytes=verified_bytes,
+            bronze_root_path=settings.bronze_root_path,
         )
 
-        if not reconciliation_result.is_reconciled:
-            error_details = "; ".join(reconciliation_result.errors)
+        # ---------------------------------------------------------
+        # 7. Construct and execute the multi-table runner
+        # ---------------------------------------------------------
 
+        bronze_runner = BronzeIngestionRunner(bronze_pipeline)
+        summary = bronze_runner.run(selected_tables)
+
+        # ---------------------------------------------------------
+        # 8. Log the overall execution summary
+        # ---------------------------------------------------------
+
+        logger.info("================================================")
+        logger.info("MULTI-TABLE BRONZE INGESTION SUMMARY")
+        logger.info("================================================")
+        logger.info("Overall status: %s", summary.status)
+        logger.info("Total tables: %d", summary.total_tables)
+        logger.info("Successful tables: %d", summary.successful_tables)
+        logger.info("Failed tables: %d", summary.failed_tables)
+
+        for result in summary.results:
+            logger.info(
+                "SUCCEEDED | %s.%s | Rows: %d | Files: %d | Run ID: %s",
+                result.source_schema,
+                result.source_table,
+                result.validated_row_count,
+                result.uploaded_file_count,
+                result.run_id,
+            )
+
+        for failure in summary.failures:
             logger.error(
-                "Bronze reconciliation failed: %s",
-                error_details,
+                "FAILED | %s.%s | Error: %s",
+                failure.source_schema,
+                failure.source_table,
+                failure.error_message,
             )
 
-            raise RuntimeError(f"Bronze ingestion reconciliation failed: {error_details}")
+        logger.info("================================================")
 
-        logger.info(
-            "Bronze reconciliation passed | "
-            "Source rows: %d | Extracted rows: %d | "
-            "Validated rows: %d",
-            reconciliation_result.source_row_count,
-            reconciliation_result.extracted_row_count,
-            reconciliation_result.validated_row_count,
-        )
+        if summary.status != "SUCCEEDED":
+            raise RuntimeError(
+                f"Multi-table Bronze ingestion completed with status: {summary.status}"
+            )
 
-        logger.info(
-            "Bronze reconciliation passed | "
-            "Expected batches: %d | Actual batches: %d | "
-            "Uploaded files: %d | Verified files: %d",
-            reconciliation_result.expected_batch_count,
-            reconciliation_result.actual_batch_count,
-            reconciliation_result.uploaded_file_count,
-            reconciliation_result.verified_file_count,
-        )
-
-        logger.info(
-            "Bronze reconciliation passed | Uploaded bytes: %d | Verified bytes: %d",
-            reconciliation_result.uploaded_bytes,
-            reconciliation_result.verified_bytes,
-        )
-
-        # ---------------------------------------------------------
-        # 6. Report ingestion results
-        # ---------------------------------------------------------
-
-        logger.info("Source: %s.%s", source_schema, source_table)
-
-        logger.info("Ingestion Run ID: %s", run_id)
-
-        logger.info("Total batches: %d", batch_count)
-
-        logger.info("Total rows: %d", validated_rows)
-
-        logger.info("Total Parquet size: %d bytes", verified_bytes)
-
-        logger.info(
-            "ADLS Gen2 destination: %s/%s",
-            settings.azure_storage_filesystem,
-            bronze_directory,
-        )
-
-        logger.info("Validated batches: %d", batch_count)
-
-        # ---------------------------------------------------------
-        # Finalize successful ingestion audit
-        # ---------------------------------------------------------
-
-        audit_record.update(
-            {
-                "status": "SUCCEEDED",
-                "validation_status": "PASSED",
-                "reconciliation_status": "PASSED",
-                "completed_at_utc": datetime.now(UTC).isoformat(),
-                "source_row_count": source_row_count,
-                "extracted_row_count": extracted_rows,
-                "validated_row_count": validated_rows,
-                "total_rows": validated_rows,
-                "expected_batch_count": expected_batch_count,
-                "total_batches": batch_count,
-                "total_files": uploaded_files,
-                "verified_files": verified_files,
-                "total_bytes": uploaded_bytes,
-                "verified_bytes": verified_bytes,
-                "reconciliation_errors": [],
-                "error_message": None,
-            }
-        )
-
-        storage_client.upload_file(
-            file_path=audit_path,
-            content=json.dumps(audit_record, indent=4).encode("utf-8"),
-            overwrite=True,
-        )
-
-        logger.info("Ingestion audit completed successfully: %s", audit_path)
-        logger.info("===============================================")
-        logger.info("Bronze ingestion completed successfully")
-        logger.info("===============================================")
-
-    except Exception as exc:
+    except Exception:
         logger.exception("Application execution failed")
-
-        # ---------------------------------------------------------
-        # Record failed ingestion audit
-        # ---------------------------------------------------------
-
-        if audit_record is not None and audit_path is not None:
-            audit_record.update(
-                {
-                    "status": "FAILED",
-                    "completed_at_utc": datetime.now(UTC).isoformat(),
-                    "source_row_count": source_row_count,
-                    "extracted_row_count": extracted_rows,
-                    "validated_row_count": validated_rows,
-                    "total_rows": validated_rows,
-                    "expected_batch_count": expected_batch_count,
-                    "total_batches": batch_count,
-                    "total_files": uploaded_files,
-                    "verified_files": verified_files,
-                    "total_bytes": uploaded_bytes,
-                    "verified_bytes": verified_bytes,
-                    "error_message": str(exc),
-                }
-            )
-
-            if validation_failed:
-                audit_record["validation_status"] = "FAILED"
-
-            if reconciliation_result is not None and not reconciliation_result.is_reconciled:
-                audit_record["reconciliation_status"] = "FAILED"
-                audit_record["reconciliation_errors"] = list(reconciliation_result.errors)
-
-            try:
-                storage_client.upload_file(
-                    file_path=audit_path,
-                    content=json.dumps(audit_record, indent=4).encode("utf-8"),
-                    overwrite=True,
-                )
-
-                logger.info("Failed ingestion audit recorded: %s", audit_path)
-
-            except Exception:
-                logger.exception("Unable to persist failed ingestion audit")
-
         raise
 
     finally:
+        # Infrastructure lifecycle remains in the composition root.
         if storage_client is not None:
             storage_client.close()
 

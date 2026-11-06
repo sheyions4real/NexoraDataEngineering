@@ -541,3 +541,80 @@ Your pipeline now demonstrates several important data engineering controls:
 5. Reconciliation: the run-level metrics agree across the source, extraction, validation, and storage stages.
 6. Auditability: the pipeline records the outcome and its supporting metrics in audit.json.
 
+
+
+
+Target responsibilities
+BronzeIngestionPipeline
+- Accept a table's metadata.
+- Extract records in batches.
+- Serialize and upload Parquet.
+- Verify uploaded files.
+- Validate Bronze data.
+- Reconcile metrics.
+- Maintain audit.json.
+- Return a structured result.
+BronzeIngestionRunner
+- Receive the selected tables.
+- Execute the pipeline for each table.
+- Collect individual ingestion results.
+- Report overall execution outcomes.
+main.py
+- Load configuration.
+- Initialize logging and infrastructure.
+- Discover source schemas.
+- Select configured tables.
+- Construct the pipeline and runner.
+- Execute the runner.
+- Clean up resources.
+
+
+====================== IMPLEMENTATION ROADMAP ==================================
+3. The implementation roadmap
+Here is the order I would follow.
+1. Phase 1 — Refactor Bronze into a reusable pipeline
+   - Move orchestration out of main.py.
+   - Create BronzeIngestionPipeline.
+   - Keep validation and reconciliation services.
+   - Move audit lifecycle management into the pipeline.
+   - Make table selection configuration-driven.
+   Next milestone
+2. Phase 2 — Prove reusability
+   
+   Test the same pipeline with:
+   - Sales.SalesOrders
+   - Sales.Products
+   - HR.Employees
+   We should not need to change the pipeline implementation to support these tables.
+   
+   Test empty tables, failures, retries and repeated runs.
+3. Phase 3 — Establish Bronze reliability
+   
+   Address:
+   - Idempotency and safe reruns.
+   - Failure recovery.
+   - Partial batch failures.
+   - Source-to-Bronze reconciliation.
+   - Audit history and operational logging.
+   We don't need to implement every enterprise feature immediately, but we should establish the correct extension points.
+4. Phase 4 — Build the Silver layer
+   
+   Start with Sales.SalesOrders.
+   
+   Implement:
+   - Bronze-to-Silver ingestion.
+   - Data cleansing and standardization.
+   - Deduplication.
+   - Data quality rules.
+   - Delta/Parquet storage strategy.
+   - Historical data handling where required.
+   Then extend to Products, Customers and other entities.
+5. Phase 5 — Gold dimensional warehouse
+   
+   Build dimensional models such as:
+   - FactSales
+   - DimCustomer
+   - DimProduct
+   - DimDate
+   - DimEmployee
+   This is where we begin creating the structures that Power BI, analytics and ML workloads will consume.

@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     azure_storage_filesystem: str = "nexora"
 
     # Source database schemas
-    source_schemas: str = "Sales"
+    source_schemas: str = "Sales,Core"
 
     @property
     def configured_source_schemas(self) -> list[str]:
@@ -76,6 +76,46 @@ class Settings(BaseSettings):
 
     # Data lake layout
     bronze_root_path: str = "bronze"
+
+    bronze_tables: str = "Sales.SalesOrders,Sales.Products,Core.Employees,Core.Customers"
+    # Tables selected for Bronze ingestion
+    bronze_tables: str = (
+        "Sales.SalesOrders,"
+        "Sales.Products,"
+        "Core.Employees,"
+        "Core.Customers"
+    )
+
+    
+    @property
+    def configured_bronze_tables(self) -> list[tuple[str, str]]:
+        """Return configured Bronze tables as (schema, table) pairs."""
+
+        configured_tables: list[tuple[str, str]] = []
+
+        for value in self.bronze_tables.split(","):
+            table_reference = value.strip()
+
+            if not table_reference:
+                continue
+
+            parts = table_reference.split(".")
+
+            if len(parts) != 2 or not all(part.strip() for part in parts):
+                raise ValueError(
+                    f"Invalid Bronze table reference: {table_reference!r}. "
+                    "Expected format: Schema.Table"
+                )
+
+            configured_tables.append((parts[0].strip(), parts[1].strip()))
+
+        if not configured_tables:
+            raise ValueError("At least one Bronze table must be configured.")
+
+        if len(set(configured_tables)) != len(configured_tables):
+            raise ValueError("Duplicate Bronze table references are not allowed.")
+
+        return configured_tables
 
 
 @lru_cache
