@@ -18,7 +18,9 @@ RESPONSIBILITIES:
 - Download uploaded files and verify byte integrity.
 - Validate Parquet structure and basic data quality.
 - Reconcile source, extracted, validated, and uploaded metrics.
+- Create a success manifest after successful reconciliation.
 - Persist ingestion progress and final audit status.
+- Record failure stage and batch-level progress.
 
 DATA ENGINEERING ROLE:
 Implements the reusable single-table Bronze ingestion workflow.
@@ -28,6 +30,8 @@ DESIGN CONSIDERATIONS:
 - Processes one batch at a time to limit memory consumption.
 - Does not discover source schemas or select tables.
 - Does not manage database or storage client lifecycles.
+- Preserves uploaded files when an ingestion run fails.
+- Creates a manifest only after successful reconciliation.
 - Re-raises failures after attempting to persist the failed audit.
 - Leaves multi-table coordination to the ingestion runner.
 """
@@ -135,14 +139,17 @@ class BronzeIngestionPipeline:
             "audit.json"
         )
 
+        manifest_path = f"{bronze_directory}/manifest.json"
+
         # ---------------------------------------------------------
-        # Initialize ingestion metrics
+        # Initialize ingestion metrics and execution tracking
         # ---------------------------------------------------------
 
         source_row_count = 0
         extracted_rows = 0
         validated_rows = 0
 
+        expected_batch_count: int | None = None
         batch_count = 0
         uploaded_files = 0
         verified_files = 0
@@ -150,8 +157,13 @@ class BronzeIngestionPipeline:
         uploaded_bytes = 0
         verified_bytes = 0
 
+        current_stage = "INITIALIZING"
+        active_batch_number: int | None = None
+        last_successful_batch_number = 0
+
         validation_failed = False
         reconciliation_result = None
+        manifest_created = False
 
         # ---------------------------------------------------------
         # Initialize the audit record before source extraction.
@@ -159,7 +171,7 @@ class BronzeIngestionPipeline:
         # be recorded against this ingestion run.
         # ---------------------------------------------------------
 
-        audit_record = {
+        audit_record: dict[str, Any] = {
             "run_id": run_id,
             "pipeline_name": self.PIPELINE_NAME,
             "source_system": self._source_system,
@@ -183,6 +195,11 @@ class BronzeIngestionPipeline:
             "verified_bytes": 0,
             "reconciliation_status": "PENDING",
             "reconciliation_errors": [],
+            "failed_stage": None,
+            "failed_batch_number": None,
+            "last_successful_batch_number": 0,
+            "manifest_path": manifest_path,
+            "manifest_status": "PENDING",
         }
 
         try:
@@ -190,6 +207,7 @@ class BronzeIngestionPipeline:
             # 1. Persist initial audit status
             # -----------------------------------------------------
 
+            current_stage = "INITIALIZING"
             self._persist_audit(audit_path, audit_record)
 
             logger.info(
@@ -203,7 +221,11 @@ class BronzeIngestionPipeline:
             # 2. Count source records and calculate expected batches
             # -----------------------------------------------------
 
+            current_stage = "SOURCE_COUNT"
             source_row_count = self._extraction_service.count_rows(table)
+
+            if source_row_count < 0:
+                raise RuntimeError("Source row count cannot be negative.")
 
             expected_batch_count = (source_row_count + self._batch_size - 1) // self._batch_size
 
@@ -242,6 +264,7 @@ class BronzeIngestionPipeline:
             # -----------------------------------------------------
 
             ingestion_timestamp = datetime.now(UTC)
+            current_stage = "EXTRACTING"
 
             for batch in self._extraction_service.extract_table(
                 table,
@@ -252,6 +275,7 @@ class BronzeIngestionPipeline:
                     continue
 
                 batch_count += 1
+                active_batch_number = batch_count
                 extracted_rows += len(batch)
 
                 # Add technical metadata to each source record.
@@ -268,7 +292,11 @@ class BronzeIngestionPipeline:
                     for record in batch
                 ]
 
-                # Serialize the batch into Parquet bytes.
+                # -------------------------------------------------
+                # 4.1 Serialize the batch into Parquet bytes
+                # -------------------------------------------------
+
+                current_stage = "SERIALIZING"
                 parquet_content = self._serializer.serialize(bronze_records)
 
                 if not parquet_content:
@@ -279,7 +307,12 @@ class BronzeIngestionPipeline:
                 file_name = f"part-{batch_count:05d}.parquet"
                 destination_path = f"{bronze_directory}/{file_name}"
 
-                # Upload the Parquet file.
+                # -------------------------------------------------
+                # 4.2 Upload the Parquet file
+                # -------------------------------------------------
+
+                current_stage = "UPLOADING"
+
                 self._storage.upload_file(
                     file_path=destination_path,
                     content=parquet_content,
@@ -296,9 +329,10 @@ class BronzeIngestionPipeline:
                 )
 
                 # -------------------------------------------------
-                # 4.1 Verify uploaded file integrity
+                # 4.3 Verify uploaded file integrity
                 # -------------------------------------------------
 
+                current_stage = "VERIFYING"
                 downloaded_content = self._storage.download_file(destination_path)
 
                 if downloaded_content != parquet_content:
@@ -311,9 +345,10 @@ class BronzeIngestionPipeline:
                 verified_bytes += len(downloaded_content)
 
                 # -------------------------------------------------
-                # 4.2 Validate the downloaded Parquet file
+                # 4.4 Validate the downloaded Parquet file
                 # -------------------------------------------------
 
+                current_stage = "VALIDATING"
                 validation_failed = True
 
                 validation_result = self._validator.validate(
@@ -342,8 +377,10 @@ class BronzeIngestionPipeline:
                 )
 
                 # -------------------------------------------------
-                # 4.3 Persist ingestion progress
+                # 4.5 Persist ingestion progress
                 # -------------------------------------------------
+
+                current_stage = "PERSISTING_PROGRESS"
 
                 audit_record.update(
                     {
@@ -356,14 +393,47 @@ class BronzeIngestionPipeline:
                         "total_bytes": uploaded_bytes,
                         "verified_files": verified_files,
                         "verified_bytes": verified_bytes,
+                        "last_successful_batch_number": batch_count,
                     }
                 )
 
                 self._persist_audit(audit_path, audit_record)
 
+                # A batch is considered successfully completed only
+                # after upload, verification, validation and audit
+                # progress persistence have all succeeded.
+                last_successful_batch_number = batch_count
+                active_batch_number = None
+                current_stage = "EXTRACTING"
+
             # -----------------------------------------------------
-            # 5. Reconcile the complete ingestion run
+            # 5. Mark complete extraction and validation
             # -----------------------------------------------------
+
+            current_stage = "VALIDATION_COMPLETED"
+
+            audit_record.update(
+                {
+                    "validation_status": "PASSED",
+                    "extracted_row_count": extracted_rows,
+                    "validated_row_count": validated_rows,
+                    "total_rows": validated_rows,
+                    "total_batches": batch_count,
+                    "total_files": uploaded_files,
+                    "total_bytes": uploaded_bytes,
+                    "verified_files": verified_files,
+                    "verified_bytes": verified_bytes,
+                    "last_successful_batch_number": last_successful_batch_number,
+                }
+            )
+
+            self._persist_audit(audit_path, audit_record)
+
+            # -----------------------------------------------------
+            # 6. Reconcile the complete ingestion run
+            # -----------------------------------------------------
+
+            current_stage = "RECONCILING"
 
             logger.info(
                 "Starting Bronze reconciliation | Table: %s.%s",
@@ -396,7 +466,63 @@ class BronzeIngestionPipeline:
                 raise RuntimeError(f"Bronze ingestion reconciliation failed: {error_details}")
 
             # -----------------------------------------------------
-            # 6. Finalize the successful audit record
+            # 7. Create the Bronze success manifest
+            #
+            # The manifest is the commit marker for downstream
+            # consumers. It is created only after reconciliation.
+            # -----------------------------------------------------
+
+            current_stage = "WRITING_MANIFEST"
+
+            completed_at = datetime.now(UTC)
+
+            manifest_record = {
+                "manifest_version": 1,
+                "status": "COMMITTED",
+                "pipeline_name": self.PIPELINE_NAME,
+                "run_id": run_id,
+                "source_system": self._source_system,
+                "source_database": self._source_database,
+                "source_schema": source_schema,
+                "source_table": source_table,
+                "started_at_utc": started_at.isoformat(),
+                "completed_at_utc": completed_at.isoformat(),
+                "source_row_count": source_row_count,
+                "extracted_row_count": extracted_rows,
+                "validated_row_count": validated_rows,
+                "expected_batch_count": reconciliation_result.expected_batch_count,
+                "actual_batch_count": batch_count,
+                "uploaded_file_count": uploaded_files,
+                "verified_file_count": verified_files,
+                "uploaded_bytes": uploaded_bytes,
+                "verified_bytes": verified_bytes,
+                "bronze_directory": bronze_directory,
+                "audit_path": audit_path,
+                "files": [
+                    f"part-{batch_number:05d}.parquet"
+                    for batch_number in range(1, uploaded_files + 1)
+                ],
+            }
+
+            self._storage.upload_file(
+                file_path=manifest_path,
+                content=json.dumps(
+                    manifest_record,
+                    indent=4,
+                ).encode("utf-8"),
+                overwrite=False,
+            )
+
+            manifest_created = True
+
+            logger.info(
+                "Bronze success manifest created | Run ID: %s | Path: %s",
+                run_id,
+                manifest_path,
+            )
+
+            # -----------------------------------------------------
+            # 8. Finalize the successful audit record
             # -----------------------------------------------------
 
             completed_at = datetime.now(UTC)
@@ -419,9 +545,15 @@ class BronzeIngestionPipeline:
                     "verified_bytes": verified_bytes,
                     "reconciliation_errors": [],
                     "error_message": None,
+                    "manifest_path": manifest_path,
+                    "manifest_status": "CREATED",
+                    "failed_stage": None,
+                    "failed_batch_number": None,
+                    "last_successful_batch_number": last_successful_batch_number,
                 }
             )
 
+            current_stage = "FINALIZING_AUDIT"
             self._persist_audit(audit_path, audit_record)
 
             logger.info(
@@ -466,7 +598,21 @@ class BronzeIngestionPipeline:
             )
 
             # -----------------------------------------------------
-            # 7. Attempt to persist the failed audit record
+            # 9. Determine the failed batch
+            # -----------------------------------------------------
+
+            failed_batch_number = active_batch_number
+
+            if (
+                failed_batch_number is None
+                and current_stage == "EXTRACTING"
+                and expected_batch_count is not None
+                and batch_count < expected_batch_count
+            ):
+                failed_batch_number = batch_count + 1
+
+            # -----------------------------------------------------
+            # 10. Attempt to persist the failed audit record
             # -----------------------------------------------------
 
             audit_record.update(
@@ -483,6 +629,11 @@ class BronzeIngestionPipeline:
                     "verified_files": verified_files,
                     "verified_bytes": verified_bytes,
                     "error_message": str(exc),
+                    "failed_stage": current_stage,
+                    "failed_batch_number": failed_batch_number,
+                    "last_successful_batch_number": last_successful_batch_number,
+                    "manifest_path": manifest_path,
+                    "manifest_status": ("CREATED" if manifest_created else "NOT_CREATED"),
                 }
             )
 
@@ -506,7 +657,11 @@ class BronzeIngestionPipeline:
             # Preserve the original exception for the caller.
             raise
 
-    def _persist_audit(self, audit_path: str, audit_record: dict[str, Any]) -> None:
+    def _persist_audit(
+        self,
+        audit_path: str,
+        audit_record: dict[str, Any],
+    ) -> None:
         """Serialize and upload the current ingestion audit record."""
 
         audit_content = json.dumps(

@@ -64,7 +64,9 @@ class Settings(BaseSettings):
     azure_storage_filesystem: str = "nexora"
 
     # Source database schemas
-    source_schemas: str = "Sales,Core"
+    source_schemas: str = "Sales,Core,Finance"
+    # bronze_tables: str = "Sales.SalesOrders,Sales.NonExistentTable,Core.Customers"
+    bronze_tables: str = "Sales.SalesOrders,Sales.Products,Core.Employees,Core.Customers"
 
     @property
     def configured_source_schemas(self) -> list[str]:
@@ -76,17 +78,11 @@ class Settings(BaseSettings):
 
     # Data lake layout
     bronze_root_path: str = "bronze"
+    audit_root_path: str = "audit"
 
-    bronze_tables: str = "Sales.SalesOrders,Sales.Products,Core.Employees,Core.Customers"
     # Tables selected for Bronze ingestion
-    bronze_tables: str = (
-        "Sales.SalesOrders,"
-        "Sales.Products,"
-        "Core.Employees,"
-        "Core.Customers"
-    )
+    bronze_tables: str = "Sales.SalesOrders,Sales.Products,Core.Employees,Core.Customers"
 
-    
     @property
     def configured_bronze_tables(self) -> list[tuple[str, str]]:
         """Return configured Bronze tables as (schema, table) pairs."""

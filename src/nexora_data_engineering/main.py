@@ -27,6 +27,7 @@ DESIGN CONSIDERATIONS:
 - Delegates multi-table coordination to BronzeIngestionRunner.
 """
 
+import argparse
 import logging
 
 from nexora_data_engineering.application.pipelines.bronze_ingestion_pipeline import (
@@ -34,6 +35,9 @@ from nexora_data_engineering.application.pipelines.bronze_ingestion_pipeline imp
 )
 from nexora_data_engineering.application.runners.bronze_ingestion_runner import (
     BronzeIngestionRunner,
+)
+from nexora_data_engineering.application.services.bronze_committed_run_discovery_service import (
+    BronzeCommittedRunDiscoveryService,
 )
 from nexora_data_engineering.application.services.bronze_reconciliation_service import (
     BronzeReconciliationService,
@@ -47,6 +51,11 @@ from nexora_data_engineering.application.services.schema_discovery_service impor
 from nexora_data_engineering.application.services.table_extraction_service import (
     TableExtractionService,
 )
+
+# this was used to simulate a failure in tableExtractor service
+# from nexora_data_engineering.application.tests.support.failing_table_extractor import (
+#     FailingTableExtractor,
+# )
 from nexora_data_engineering.config.settings import get_settings
 from nexora_data_engineering.infrastructure.database.schema_inspector import (
     SQLServerSchemaInspector,
@@ -68,6 +77,16 @@ from nexora_data_engineering.infrastructure.storage.azure_data_lake import (
 
 def main() -> None:
     """Initialize dependencies and execute multi-table Bronze ingestion."""
+
+    parser = argparse.ArgumentParser(description="Nexora Data Engineering application.")
+
+    parser.add_argument(
+        "--discover-bronze",
+        action="store_true",
+        help="Discover committed Bronze runs without executing ingestion.",
+    )
+
+    args = parser.parse_args()
 
     settings = get_settings()
 
@@ -157,6 +176,7 @@ def main() -> None:
         # ---------------------------------------------------------
 
         extractor = SQLServerTableExtractor(engine)
+
         serializer = ParquetSerializer()
 
         storage_client = AzureDataLakeStorage(
@@ -165,10 +185,56 @@ def main() -> None:
         )
 
         # ---------------------------------------------------------
-        # 5. Initialize application services
+        # 5. Execute Bronze discovery when requested
+        # ---------------------------------------------------------
+
+        if args.discover_bronze:
+            logger.info("Starting Bronze committed-run discovery.")
+
+            discovery_service = BronzeCommittedRunDiscoveryService(
+                storage=storage_client,
+                source_database=settings.db_database,
+                bronze_root_path=settings.bronze_root_path,
+                audit_root_path="audit",
+            )
+
+            for table in selected_tables:
+                logger.info(
+                    "Discovering committed runs for %s.%s",
+                    table.schema,
+                    table.name,
+                )
+
+                committed_runs = discovery_service.discover_committed_runs(table)
+
+                if not committed_runs:
+                    logger.warning(
+                        "No committed Bronze runs found for %s.%s",
+                        table.schema,
+                        table.name,
+                    )
+                    continue
+
+                for run in committed_runs:
+                    logger.info(
+                        "COMMITTED | %s.%s | Load date: %s | Rows: %d | Files: %d | Run ID: %s",
+                        run.source_schema,
+                        run.source_table,
+                        run.load_date,
+                        run.source_row_count,
+                        len(run.files),
+                        run.run_id,
+                    )
+
+            logger.info("Bronze committed-run discovery completed.")
+            return
+
+        # ---------------------------------------------------------
+        # 5.2 Initialize application services
         # ---------------------------------------------------------
 
         extraction_service = TableExtractionService(extractor)
+
         validation_service = BronzeValidationService()
         reconciliation_service = BronzeReconciliationService()
 

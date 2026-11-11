@@ -208,3 +208,55 @@ class AzureDataLakeStorage:
 
         self._service_client.close()
         self._credential.close()
+
+    def list_files(
+        self,
+        directory_path: str,
+    ) -> list[str]:
+        """List files recursively beneath an ADLS directory.
+
+        Args:
+            directory_path: Relative directory path inside the filesystem.
+
+        Returns:
+            Sorted filesystem-relative paths for all files found.
+            Returns an empty list if the directory does not exist.
+
+        Raises:
+            ValueError: If the supplied directory path is invalid.
+        """
+
+        normalized_path = directory_path.strip("/")
+
+        if not normalized_path or "\\" in normalized_path or ".." in normalized_path.split("/"):
+            raise ValueError("A valid relative data lake directory path is required.")
+
+        logger.info(
+            "ADLS: Listing files beneath directory: %s",
+            normalized_path,
+        )
+
+        try:
+            paths = self._filesystem_client.get_paths(
+                path=normalized_path,
+                recursive=True,
+            )
+
+            files = [path.name for path in paths if not path.is_directory]
+
+        except ResourceNotFoundError:
+            logger.info(
+                "ADLS: Directory does not exist: %s",
+                normalized_path,
+            )
+            return []
+
+        result = sorted(files)
+
+        logger.info(
+            "ADLS: Found %s file(s) beneath %s.",
+            len(result),
+            normalized_path,
+        )
+
+        return result

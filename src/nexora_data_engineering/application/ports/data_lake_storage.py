@@ -44,3 +44,14 @@ class DataLakeStorage(Protocol):
     ) -> bytes:
         """Download file contents from the data lake."""
         ...
+
+    def list_files(
+        self,
+        directory_path: str,
+    ) -> list[str]:
+        """List files recursively beneath a data lake directory.
+
+        Returns filesystem-relative file paths.
+        Returns an empty list when the directory does not exist.
+        """
+        ...

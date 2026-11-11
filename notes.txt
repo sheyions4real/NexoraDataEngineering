@@ -618,3 +618,12 @@ Here is the order I would follow.
    - DimDate
    - DimEmployee
    This is where we begin creating the structures that Power BI, analytics and ML workloads will consume.
+
+
+
+============================ TWO RUN COMMAND ==============================
+To run the application for bronze ingestion use
+    python -m nexora_data_engineering.main
+
+To run bronze commited-runs discovery pass the arg --discover-bronze
+    python -m nexora_data_engineering.main --discover-bronze
