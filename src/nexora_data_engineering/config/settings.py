@@ -65,6 +65,7 @@ class Settings(BaseSettings):
 
     # Source database schemas
     source_schemas: str = "Sales,Core,Finance"
+    # Tables selected for Bronze ingestion
     # bronze_tables: str = "Sales.SalesOrders,Sales.NonExistentTable,Core.Customers"
     bronze_tables: str = "Sales.SalesOrders,Sales.Products,Core.Employees,Core.Customers"
 
@@ -81,7 +82,7 @@ class Settings(BaseSettings):
     audit_root_path: str = "audit"
 
     # Tables selected for Bronze ingestion
-    bronze_tables: str = "Sales.SalesOrders,Sales.Products,Core.Employees,Core.Customers"
+    # bronze_tables: str = "Sales.SalesOrders,Sales.Products,Core.Employees,Core.Customers"
 
     @property
     def configured_bronze_tables(self) -> list[tuple[str, str]]:
@@ -117,4 +118,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Return a cached application settings instance."""
-    return Settings()
+    return Settings()  # pyright: ignore[reportCallIssue]

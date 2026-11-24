@@ -30,14 +30,27 @@ DESIGN CONSIDERATIONS:
 import argparse
 import logging
 
+# FOR TEMP SILVER PHASE
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# for Bronze Ingestion
 from nexora_data_engineering.application.pipelines.bronze_ingestion_pipeline import (
     BronzeIngestionPipeline,
 )
 from nexora_data_engineering.application.runners.bronze_ingestion_runner import (
     BronzeIngestionRunner,
 )
+
+# ================== SLIVER PHASE IMPORTS ====================
+from nexora_data_engineering.application.runners.silver_data_quality_validation_runner import (
+    SilverDataQualityValidationRunner,
+)
 from nexora_data_engineering.application.services.bronze_committed_run_discovery_service import (
     BronzeCommittedRunDiscoveryService,
+)
+from nexora_data_engineering.application.services.bronze_dataset_reader_service import (
+    BronzeDatasetReaderService,
 )
 from nexora_data_engineering.application.services.bronze_reconciliation_service import (
     BronzeReconciliationService,
@@ -47,6 +60,12 @@ from nexora_data_engineering.application.services.bronze_validation_service impo
 )
 from nexora_data_engineering.application.services.schema_discovery_service import (
     SchemaDiscoveryService,
+)
+from nexora_data_engineering.application.services.silver_data_quality_validation_service import (
+    SilverDataQualityValidationService,
+)
+from nexora_data_engineering.application.services.silver_source_profiling_service import (
+    SilverSourceProfilingService,
 )
 from nexora_data_engineering.application.services.table_extraction_service import (
     TableExtractionService,
@@ -67,6 +86,9 @@ from nexora_data_engineering.infrastructure.database.sql_server import (
 from nexora_data_engineering.infrastructure.database.sql_server_table_extractor import (
     SQLServerTableExtractor,
 )
+from nexora_data_engineering.infrastructure.serialization.parquet_reader import (
+    PyArrowParquetReader,
+)
 from nexora_data_engineering.infrastructure.serialization.parquet_serializer import (
     ParquetSerializer,
 )
@@ -84,6 +106,11 @@ def main() -> None:
         "--discover-bronze",
         action="store_true",
         help="Discover committed Bronze runs without executing ingestion.",
+    )
+    parser.add_argument(
+        "--validate-silver",
+        action="store_true",
+        help="Profile and validate committed Bronze datasets for Silver.",
     )
 
     args = parser.parse_args()
@@ -169,7 +196,41 @@ def main() -> None:
         )
 
         for table in selected_tables:
-            logger.info("Selected table: %s.%s", table.schema, table.name)
+            if table.schema != "Sales" or table.name != "SalesOrders":
+                continue
+
+            logger.info("========== SILVER SOURCE INSPECTION ==========")
+
+            logger.info("Table: %s.%s", table.schema, table.name)
+            logger.info("Primary Key: %s", table.primary_key)
+
+            logger.info("Columns:")
+
+            for column in table.columns:
+                logger.info(
+                    "Column: %s | SQL Type: %s | Nullable: %s | Identity: %s | Default: %s",
+                    column.name,
+                    column.data_type,
+                    column.nullable,
+                    column.identity,
+                    column.default,
+                )
+
+            logger.info("Foreign Keys:")
+
+            for foreign_key in table.foreign_keys:
+                logger.info(
+                    "Columns: %s -> %s.%s (%s)",
+                    foreign_key.columns,
+                    foreign_key.referred_schema,
+                    foreign_key.referred_table,
+                    foreign_key.referred_columns,
+                )
+
+            logger.info("==============================================")
+
+        # for table in selected_tables:
+        #     logger.info("Selected table: %s.%s", table.schema, table.name)
 
         # ---------------------------------------------------------
         # 4. Initialize infrastructure implementations
@@ -183,6 +244,120 @@ def main() -> None:
             account_url=settings.azure_storage_account_url,
             filesystem_name=settings.azure_storage_filesystem,
         )
+
+        # ---------------------------------------------------------
+        # 5.1 Execute Silver data quality validation when requested
+        # ---------------------------------------------------------
+
+        if args.validate_silver:
+            logger.info("Starting Silver data quality validation.")
+
+            sales_orders = next(
+                (
+                    table
+                    for table in selected_tables
+                    if table.schema.casefold() == "sales" and table.name.casefold() == "salesorders"
+                ),
+                None,
+            )
+
+            if sales_orders is None:
+                raise RuntimeError(
+                    "Sales.SalesOrders is not present in the configured Bronze table selections."
+                )
+
+            bronze_discovery_service = BronzeCommittedRunDiscoveryService(
+                storage=storage_client,
+                source_database=settings.db_database,
+                bronze_root_path=settings.bronze_root_path,
+                audit_root_path="audit",
+            )
+
+            dataset_reader = BronzeDatasetReaderService(
+                discovery_service=bronze_discovery_service,
+                storage=storage_client,
+                parquet_reader=PyArrowParquetReader(),
+            )
+
+            silver_runner = SilverDataQualityValidationRunner(
+                dataset_reader=dataset_reader,
+                profiler=SilverSourceProfilingService(),
+                validator=SilverDataQualityValidationService(),
+            )
+
+            validation_results = silver_runner.run(
+                table=sales_orders,
+                non_negative_columns=(
+                    "TotalGrossAmount",
+                    "TotalTaxAmount",
+                    "TotalNetAmount",
+                ),
+            )
+
+            if not validation_results:
+                logger.warning("No committed Bronze snapshots found for Sales.SalesOrders.")
+                return
+
+            failed_snapshots = 0
+
+            logger.info("================================================")
+            logger.info("SILVER DATA QUALITY VALIDATION SUMMARY")
+            logger.info("================================================")
+
+            for committed_run, profile, validation in validation_results:
+                status = "PASSED" if validation.passed else "FAILED"
+
+                logger.info(
+                    "%s | Sales.SalesOrders | Run ID: %s | Rows: %d | Columns: %d",
+                    status,
+                    committed_run.run_id,
+                    profile.total_rows,
+                    profile.total_columns,
+                )
+
+                logger.info("Column profiling:")
+
+                for column in profile.columns:
+                    logger.info(
+                        "Column: %s | Type: %s | Rows: %d | Nulls: %d "
+                        "| Distinct: %d | Min: %s | Max: %s",
+                        column.name,
+                        column.data_type,
+                        column.total_count,
+                        column.null_count,
+                        column.distinct_count,
+                        column.minimum,
+                        column.maximum,
+                    )
+
+                if not validation.passed:
+                    failed_snapshots += 1
+
+                    for issue in validation.issues:
+                        logger.error(
+                            "QUALITY ISSUE | Rule: %s | Column: %s "
+                            "| Affected rows: %d | Message: %s",
+                            issue.rule,
+                            issue.column,
+                            issue.affected_rows,
+                            issue.message,
+                        )
+
+            logger.info("Total snapshots: %d", len(validation_results))
+            logger.info(
+                "Successful snapshots: %d",
+                len(validation_results) - failed_snapshots,
+            )
+            logger.info("Failed snapshots: %d", failed_snapshots)
+            logger.info("================================================")
+
+            if failed_snapshots:
+                raise RuntimeError(
+                    f"Silver validation failed for {failed_snapshots} Bronze snapshot(s)."
+                )
+
+            logger.info("Silver data quality validation completed successfully.")
+            return
 
         # ---------------------------------------------------------
         # 5. Execute Bronze discovery when requested
@@ -206,6 +381,40 @@ def main() -> None:
                 )
 
                 committed_runs = discovery_service.discover_committed_runs(table)
+
+                if table.schema == "Sales" and table.name == "SalesOrders":
+                    if not committed_runs:
+                        logger.warning("No Bronze dataset available for inspection.")
+                    else:
+                        latest_run = committed_runs[-1]
+
+                        logger.info("========== BRONZE PARQUET INSPECTION ==========")
+                        logger.info("Run ID: %s", latest_run.run_id)
+                        logger.info("Bronze directory: %s", latest_run.bronze_directory)
+
+                        for file_name in latest_run.files:
+                            file_path = f"{latest_run.bronze_directory}/{file_name}"
+
+                            parquet_bytes = storage_client.download_file(file_path)
+
+                            parquet_file = pa.BufferReader(parquet_bytes)
+
+                            parquet_schema = pq.read_schema(parquet_file)
+
+                            logger.info("Parquet file: %s", file_name)
+                            logger.info("Parquet schema:\n%s", parquet_schema)
+
+                            parquet_file.seek(0)
+
+                            parquet_data = pq.read_table(parquet_file)
+
+                            logger.info("Parquet rows: %d", parquet_data.num_rows)
+                            logger.info(
+                                "First five records:\n%s",
+                                parquet_data.slice(0, 5).to_pylist(),
+                            )
+
+                        logger.info("==============================================")
 
                 if not committed_runs:
                     logger.warning(

@@ -265,6 +265,60 @@ class BronzeCommittedRunDiscoveryService:
             )
             return None
 
+        # ---------------------------------------------------------
+        # Verify completed validation and reconciliation
+        # ---------------------------------------------------------
+
+        if audit.get("validation_status") != "PASSED":
+            logger.warning(
+                "Bronze validation did not pass: %s",
+                expected_audit_path,
+            )
+            return None
+
+        if audit.get("reconciliation_status") != "PASSED":
+            logger.warning(
+                "Bronze reconciliation did not pass: %s",
+                expected_audit_path,
+            )
+            return None
+
+        # ---------------------------------------------------------
+        # Reconcile manifest metrics against the audit record
+        # ---------------------------------------------------------
+
+        metric_mappings = {
+            "source_row_count": "source_row_count",
+            "extracted_row_count": "extracted_row_count",
+            "validated_row_count": "validated_row_count",
+            "expected_batch_count": "expected_batch_count",
+            "actual_batch_count": "total_batches",
+            "uploaded_file_count": "total_files",
+            "verified_file_count": "verified_files",
+            "uploaded_bytes": "total_bytes",
+            "verified_bytes": "verified_bytes",
+        }
+
+        for manifest_field, audit_field in metric_mappings.items():
+            manifest_value = manifest.get(manifest_field)
+            audit_value = audit.get(audit_field)
+
+            if (
+                not isinstance(manifest_value, int)
+                or isinstance(manifest_value, bool)
+                or not isinstance(audit_value, int)
+                or isinstance(audit_value, bool)
+                or manifest_value < 0
+                or audit_value < 0
+                or manifest_value != audit_value
+            ):
+                logger.warning(
+                    "Bronze manifest/audit metric mismatch for %s: %s",
+                    manifest_field,
+                    manifest_path,
+                )
+                return None
+
         if audit.get("run_id") != run_id:
             logger.warning(
                 "Manifest and audit run IDs do not match: %s",

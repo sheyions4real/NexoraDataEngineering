@@ -627,3 +627,124 @@ To run the application for bronze ingestion use
 
 To run bronze commited-runs discovery pass the arg --discover-bronze
     python -m nexora_data_engineering.main --discover-bronze
+
+
+We will implement incremental ingestion/loading() and historical tracking later()
+
+================================================================================
+                   SILVER LAYER OPERATION (Transformation)
+================================================================================
+Silver transformation
+1. Discover committed Bronze run.
+2. Read Parquet files.
+3. Validate schema and data types.
+4. Handle nulls and invalid values.
+5. Standardize dates, amounts and text.
+6. Deduplicate records.
+7. Apply business rules.
+8. Write the cleaned Silver dataset.
+
+We'll initially use PyArrow and Parquet, which fit the existing Python implementation. 
+We'll consider Delta Lake when we introduce Spark or Databricks rather than adding another 
+technology prematurely
+
+3. Silver transformation workflow
+For our first table, the workflow will be:
+1. Discover a committed Bronze run for Sales.SalesOrders.
+2. Read its Parquet file from ADLS.
+3. Inspect the schema and load the data.
+4. Validate the columns and expected data types.
+5. Apply cleaning and standardization.
+6. Check primary-key uniqueness and duplicates.
+7. Apply appropriate Sales Order business rules.
+8. Write the transformed dataset to Silver.
+9. Validate the Silver output.
+10. Record transformation metadata and execution status.
+
+
+We executed:
+
+python -m nexora_data_engineering.main --validate-silver
+
+The application successfully:
+
+Connected to SQL Server.
+Discovered configured source schemas.
+Resolved the configured Bronze tables.
+Connected to ADLS Gen2.
+Discovered committed Bronze snapshots.
+Read the committed Parquet datasets.
+Profiled the datasets.
+Validated the datasets against structural and business rules.
+Produced a validation summary.
+
+
+## **Files and their responsibilities**
+
+| File                                                             | Responsibility                                                                                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `domain/models/table_metadata.py`                                | Defines source database schemas, tables, columns, primary keys and foreign keys.                        |
+| `domain/models/bronze_committed_run.py`                          | Represents a successfully committed Bronze ingestion snapshot.                                          |
+| `domain/models/silver_dataset_profile.py`                        | Defines dataset and column profiling statistics.                                                        |
+| `domain/models/silver_data_quality_result.py`                    | Defines data quality issues and overall validation results.                                             |
+| `application/ports/parquet_reader.py`                            | Defines the contract for reading Parquet files.                                                         |
+| `infrastructure/serialization/parquet_reader.py`                 | Implements Parquet reading using PyArrow.                                                               |
+| `application/services/bronze_committed_run_discovery_service.py` | Discovers and verifies successfully committed Bronze snapshots.                                         |
+| `application/services/bronze_dataset_reader_service.py`          | Downloads, reads and verifies committed Bronze Parquet datasets.                                        |
+| `application/services/silver_source_profiling_service.py`        | Profiles datasets by calculating data types, null counts, distinct counts, minimums and maximums.       |
+| `application/services/silver_data_quality_validation_service.py` | Validates required columns, null constraints, unique keys and non-negative values.                      |
+| `application/runners/silver_data_quality_validation_runner.py`   | Coordinates Bronze dataset reading, Silver profiling and data quality validation.                       |
+| `main.py`                                                        | Acts as the composition root, initializes dependencies and executes the requested application workflow. |
+
+## **Process flow — one sentence**
+
+**SQL Server → Bronze ingestion and storage in ADLS Gen2 → committed snapshot discovery → Parquet dataset reading → Silver source profiling → data quality validation → validation results and reporting.**
+
+
+Actual execution result
+
+Metric
+
+Result
+
+Source table
+
+Sales.SalesOrders
+
+Committed snapshots
+
+2
+
+Successful snapshots
+
+2
+
+Failed snapshots
+
+0
+
+Rows in each reported snapshot
+
+51
+
+Columns per snapshot
+
+19
+
+The two snapshots represent separate committed Bronze runs. They are not automatically combined into one historical dataset.
+
+
+
+
+
+Example scenario
+Suppose Bronze contains:
+Load date	Run IDs	Rows per run
+Yesterday	3	51 each
+Today	2	51 each
+
+What Silver does
+1. Read: Discovers all five valid, committed run IDs and reads each run's Parquet files independently.
+2. Profile: For each run, calculates its row count, column count, null count, distinct values, and minimum/maximum values.
+3. Validate: Checks each run independently for required columns, nulls in non-nullable columns, duplicate primary keys, and negative sales amounts.
+4. Report: Produces a separate profiling and validation result for each run.

@@ -16,6 +16,7 @@ dependencies = [
     "azure-identity>=1.19",
     "azure-storage-file-datalake>=12.18",
     "pydantic-settings>=2.7",
+    "tzdata>=2025.1",
 ]
 
 [project.optional-dependencies]
